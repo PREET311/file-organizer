@@ -79,9 +79,9 @@ On a Mac, the first time tidy looks at Desktop, Documents or Downloads, macOS as
 access them. Click **OK / Allow**.
 
 ### 6. Undo
-Menu › **6. Undo a previous run** (or `python tidy.py undo`). Pick the run and type `YES`. tidy
-moves everything back, checks that each file really is back, and tells you about anything it couldn't
-restore and why. If a run was cut off (for example by a power cut), tidy tidies up the unfinished step
+Menu › **6. Undo a previous run** (or `python tidy.py undo`). Pick the run; tidy shows (and saves as a
+report) where everything will go back to, and waits for `YES`. Then it moves everything back, checks
+that each file really is back, and tells you about anything it couldn't restore and why. If a run was cut off (for example by a power cut), tidy tidies up the unfinished step
 the next time it starts, and that run can still be undone.
 
 ### 7. The _Review folder
@@ -129,6 +129,19 @@ Menu › **8. Watch Downloads** (or `python tidy.py watch`) sorts new files in D
 minutes, once they haven't changed for 10 minutes. It uses the same rules and journal, so it can be
 undone like any other run. tidy prints the exact steps to start it automatically at login (Task
 Scheduler on Windows, launchd on Mac, cron or systemd on Linux).
+
+### 11. Good to know
+- **"python is not recognized" (Windows):** reinstall Python and tick *Add python.exe to PATH*, or type
+  `py tidy.py` instead. If typing `python` opens the Microsoft Store, install from python.org as above.
+- **OneDrive / iCloud:** files that are only in the cloud ("online-only") are left alone, so nothing gets
+  downloaded by accident. Files tidy moves out of a synced Desktop or Documents folder leave that cloud
+  folder but are safe in your library. If you want the library synced too, put it inside your OneDrive
+  or iCloud Drive folder.
+- **Files that are open** in another app (Windows) are skipped and listed in the report. Close the app
+  and run tidy again.
+- **What tidy never touches:** system and app folders, apps, hidden files, code projects (folders with
+  `.git`, `package.json`, `venv`…), downloads that are still in progress, anything changed in the last
+  10 minutes, and online-only cloud files.
 
 ## Commands for power users
 ```

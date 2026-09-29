@@ -45,7 +45,8 @@ TYPES = {  # file extensions by kind; the last six are the "Other documents" typ
     "archive": "zip rar 7z tar gz tgz bz2 xz zst iso cab",
     "code": "py ipynb js ts jsx tsx java c h cpp hpp cs go rs rb php swift kt sql sh bat ps1 r lua pl json xml yml "
             "yaml toml css scss",
-    "design": "psd ai sketch fig xd indd eps svg cdr afdesign afphoto xcf kra procreate blend dwg dxf ttf otf woff woff2",
+    "design": "psd ai sketch fig xd indd eps svg cdr afdesign afphoto xcf kra procreate blend dwg dxf ttf otf "
+              "woff woff2",
     "installer": "exe msi dmg pkg apk xapk apks appx appxbundle msix msixbundle deb rpm appimage",
     "junk": "log dmp bak old crash torrent",
     "sidecar": "aae xmp",
@@ -95,6 +96,9 @@ def defaults():
 
 # ================================================================ 2. CONSOLE (colours, questions, progress)
 def _console():
+    if sys.stdout is None:  # started without a console (pythonw.exe at login): write to a log file instead
+        os.makedirs(DATA, exist_ok=True)
+        sys.stdout = sys.stderr = open(os.path.join(DATA, "watch.log"), "a", encoding="utf-8", buffering=1)
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(errors="replace")  # an odd file name must never crash printing
@@ -110,8 +114,8 @@ def _console():
         return False
 
 
+COLOR = _console() and sys.stdout.isatty() and "NO_COLOR" not in os.environ
 TTY = sys.stdout.isatty()
-COLOR = _console() and TTY and "NO_COLOR" not in os.environ
 
 
 def paint(s, c): return f"\033[{c}m{s}\033[0m" if COLOR else str(s)
@@ -629,7 +633,8 @@ def setup(cfg=None):
             cfg["sources"].append({"path": kf[n], "subfolders": n == "Documents"})
     add_folders(cfg)
     while True:
-        lib = clean_path(ask("\nWhere should the organized files go?", cfg["library"] or os.path.join(HOME, "Organized")))
+        lib = clean_path(ask("\nWhere should the organized files go?",
+                             cfg["library"] or os.path.join(HOME, "Organized")))
         why = bad_library(lib, cfg["sources"])
         if not why:
             break
@@ -1010,7 +1015,8 @@ def classify(R, path, rel, st):
                 return ["Documents", cat], f"picture whose name has {words}", kind, d, timed
         return ["Photos", y] + ([f"{d:%Y-%m}"] if d else []), f"photo taken {when} ({how})", kind, d, timed
     if kind == "audio":
-        if x in ("amr", "3ga") or VOICE_RX.match(name) or any("record" in f or "voice" in f for f in folders):
+        if x in ("amr", "3ga") or VOICE_RX.match(name) or any("record" in f or "voice" in f or f == "call"
+                                                                 for f in folders):
             return ["Voice notes"], "voice recording (from its name, type or folder)", "voice", None, False
         return ["Music"], "music or audio", kind, None, False
     if kind in KIND_HOME:
@@ -1216,8 +1222,9 @@ def find_dupes(pool, quiet=False):
         for x in g:
             names[plain_name(os.path.basename(x["src"]))].append(x)
         for same in names.values():
-            maybe += [[same[0]["src"], x["src"], size(x["size"])] for x in same[1:] if not (
-                      same[0].get("lib") and x.get("lib")) and (x.get("_g") is None or x.get("_g") != same[0].get("_g"))]
+            first = same[0]
+            maybe += [[first["src"], x["src"], size(x["size"])] for x in same[1:] if not (first.get("lib") and
+                      x.get("lib")) and (x.get("_g") is None or x.get("_g") != first.get("_g"))]
     return groups, maybe
 
 
@@ -1334,7 +1341,8 @@ def make_plan(cfg, mode="organize", folder=None, quiet=False):
             if main and it is not main and not it["_group"] == "junk" and (k in ("video", "sidecar") or k ==
                                                                             "photo" and it["_group"] == "photo"):
                 it["dst"] = os.path.join(os.path.dirname(main["dst"]), os.path.basename(it["src"]))
-                it["why"], it["_main"] = f"kept together with {os.path.basename(main['src'])} (Live Photo/edit/RAW)", main
+                it["why"] = f"kept together with {os.path.basename(main['src'])} (Live Photo, edit or RAW file)"
+                it["_main"] = main
     # duplicates (compared with each other and with what is already in the library)
     if mode != "resort":  # (re-sorting compares the library's loose files with each other)
         sizes = None if mode == "dupes" else {i["size"] for i in items}
@@ -1725,11 +1733,24 @@ def undo_menu(run_id=None):
         if i is None:
             return
         r = runs[i]
+    mv = moves(r)  # the undo plan: every move of that run, in reverse
+    plan = {"id": new_id(), "made": stamp(), "mode": "undo", "library": r["head"].get("library") or HOME,
+            "items": [{"src": b["dst"], "dst": b["src"], "kind": b["kind"], "size": b["size"], "cat": short(
+                os.path.dirname(b["src"])), "why": f"back to where it was before {r['head'].get('started')}"}
+                for b in reversed(mv)], "skipped": [], "maybe": [], "scanned": len(mv),
+            "scanned_bytes": sum(b["size"] for b in mv)}
+    rep = write_report(plan)
+    title("The undo plan (nothing has been changed yet)")
+    for c, (n, b) in cats(plan)[:10]:
+        say(f"   back to {c[:40]:<40} {n:>8,}  {size(b):>10}")
+    say(f"Full report: {rep}")
+    show(rep)
     later = [x for x in runs if x["head"].get("started", "") > r["head"].get("started", "") and not x["undone"]]
     if later:
         warn(f"Note: {count(len(later), 'later run')} came after this one. If they moved the same files again, "
              "undo those first.")
-    if confirm(f"This moves {count(len(moves(r)), 'item')} back to where they were before that run."):
+    if confirm(f"\nThis moves {count(len(mv), 'item')} ({size(plan['scanned_bytes'])}) back to where they were "
+               "before that run."):
         with Lock():
             undo_run(r)
 
@@ -1774,13 +1795,16 @@ def tree_text(rows, root, depth):
                      for k, a in sorted(agg.items()) if k or root)
 
 
+def short(p): return "~" + p[len(HOME):] if inside(p, HOME) and key(p) != key(HOME) else p
+
+
 def write_report(plan, res=None):
     """A self-contained HTML page: summary cards, sizes by category, the 25 largest, the full searchable plan,
     what is left alone and why, and a before/after folder preview."""
     e, lib, items = html.escape, plan["library"], plan["items"]
     du = [i for i in items if i.get("dup")]
     mv = [i for i in items if not i.get("dup")]
-    def short(p): return "~" + p[len(HOME):] if inside(p, HOME) else p
+    def where(p): return os.path.relpath(p, lib) if inside(p, lib) else short(p)
     cards = [("Files looked at", f"{plan['scanned']:,}"), ("Total size", size(plan["scanned_bytes"])),
              ("Will move", f"{len(mv):,} - {size(sum(i['size'] for i in mv))}"),
              ("Duplicates", f"{len(du):,} - {size(sum(i['size'] for i in du))} wasted"),
@@ -1798,18 +1822,20 @@ def write_report(plan, res=None):
              f"{size(b)}</span></div>" for c, (n, b) in cats(plan)]
     big = sorted(items, key=lambda i: -i["size"])[:25]
     body.append("<h2>The 25 largest</h2><table><tr><th>Size<th>File<th>Goes to</tr>" + "".join(
-        f"<tr><td class=n>{size(i['size'])}<td>{e(short(i['src']))}<td>{e(os.path.relpath(i['dst'], lib))}" for i in big) +
+        f"<tr><td class=n>{size(i['size'])}<td>{e(short(i['src']))}<td>{e(where(i['dst']))}"
+        for i in big) +
         "</table>")
     before = tree_text([(short(os.path.dirname(i["src"])).split(os.sep), i["size"]) for i in items], "", 9)
-    after = tree_text([(os.path.relpath(os.path.dirname(i["dst"]), lib).split(os.sep), i["size"]) for i in items],
-                      os.path.basename(lib), 3)
+    after = tree_text([(where(os.path.dirname(i["dst"])).split(os.sep), i["size"]) for i in items],
+                      "" if plan["mode"] == "undo" else os.path.basename(lib), 9 if plan["mode"] == "undo" else 3)
     body.append(f"<h2>Before and after</h2><div class=two><div><b>Where things are now</b><pre>{e(before)}</pre>"
                 f"</div><div><b>Where they will be</b><pre>{e(after)}</pre></div></div>")
     for sid, h in (("plan", "The full plan"), ("skip", "Left alone, and why"),
                    ("maybe", "Probably the same (same size and name, different content) - not moved")):
         body.append(f"<h2>{h}</h2><div id={sid}><input placeholder='Search...'><div></div></div>")
-    data = {"items": [[short(i["src"]), os.path.relpath(i["dst"], lib), i["why"]] for i in items],
-            "skipped": [[short(p), w] for p, w in plan["skipped"]], "maybe": [[short(a), short(b), n] for a, b, n in plan["maybe"]],
+    data = {"items": [[short(i["src"]), where(i["dst"]), i["why"]] for i in items],
+            "skipped": [[short(p), w] for p, w in plan["skipped"]],
+            "maybe": [[short(a), short(b), n] for a, b, n in plan["maybe"]],
             "failed": [[short(p), w] for p, w in (res or {}).get("failed", [])]}
     pre, rest = REPORT.split("@BODY@")
     mid, post = rest.split("@DATA@")
@@ -2070,7 +2096,8 @@ def fetch(src, new, stage, mem, quiet=False):
     if not quiet:
         good(f"Copied and checked {count(ok, 'file')}.")
         if failed:
-            warn(f"{count(failed, 'file')} didn't copy correctly; they stay on the phone and are tried again next time.")
+            warn(f"{count(failed, 'file')} didn't copy correctly; they stay on the phone and are tried again "
+                 "next time.")
     return ok
 
 
@@ -2322,7 +2349,7 @@ def main(argv=None):
         return 0 if selftest(a.keep) else 1
     cfg = load_config()
     if not cfg:
-        if not sys.stdin.isatty():
+        if not (sys.stdin and sys.stdin.isatty()):
             return bad("tidy isn't set up yet: run  python tidy.py  once and answer a few questions.") or 1
         cfg = setup()
     if not a.cmd:

@@ -130,7 +130,7 @@ def ask(q, default=""):
     return a or default
 
 
-def yes_no(q, default="n"): return ask(q + (" (Y/n)" if default == "y" else " (y/N)"), default).lower()[:1] == "y"
+def yes_no(q, default="n"): return (ask(q + (" (Y/n)" if default == "y" else " (y/N)")) or default).lower()[:1] == "y"
 
 
 def confirm(what, word="YES"):
@@ -165,6 +165,12 @@ def size(n):
 def count(n, word): return f"{n:,} {word}" + ("" if n == 1 else "s")
 def span(s): s = int(s); return f"{s // 3600}h {s // 60 % 60}m" if s >= 3600 else f"{s // 60}m {s % 60}s"
 def stamp(): return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def new_id():
+    """Sortable id like 20240312-101112-345 (milliseconds), taken from one clock reading."""
+    t = time.time()
+    return time.strftime("%Y%m%d-%H%M%S-", time.localtime(t)) + f"{int(t * 1000) % 1000:03d}"
 
 
 class Progress:
@@ -440,15 +446,14 @@ class Journal:
     and again after ('done' or 'fail'), so undo knows exactly what happened, even after a crash."""
     def __init__(s, kind, **info):
         os.makedirs(os.path.join(DATA, "runs"), exist_ok=True)
-        s.id = time.strftime("%Y%m%d-%H%M%S-") + f"{int(time.time() * 1000) % 1000:03d}" + \
-            "".join(random.choices(string.ascii_lowercase, k=2))
+        s.id = new_id() + "".join(random.choices(string.ascii_lowercase, k=2))
         s.path = os.path.join(DATA, "runs", s.id + ".jsonl")
         s.f, s.n = open(s.path, "a", encoding="utf-8"), 0
         s.w(t="run", id=s.id, kind=kind, started=stamp(), **info)
         s.sync()
 
     def w(s, **r):
-        s.f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        s.f.write(json.dumps(r) + "\n")  # ASCII-escaped: odd (undecodable) file names can't break it
         s.f.flush()
 
     def sync(s): os.fsync(s.f.fileno())
@@ -1163,27 +1168,7 @@ def structural(parts):
     return top == "WhatsApp & Chats" and n <= 1 or top in ("Music", "Voice notes", *KIND_HOME.values()) and n == 0
 
 
-# ================================================================ 7. PLANNING (never changes anything on disk)
-def rank_of(p):
-    kf = known_folders()
-    for i, n in enumerate(("Documents", "Desktop", "Downloads"), 1):
-        if key(kf[n]) == key(p) or os.path.basename(p.rstrip("\\/")).lower() == n.lower():
-            return i
-    return 4
-
-
-def roots_for(cfg, mode, folder):
-    if mode == "import":
-        return [(folder, True, 5)]
-    if mode == "resort":
-        return [(cfg["library"], True, 0)]
-    src = cfg["sources"]
-    if mode == "watch":
-        src = [s for s in src if os.path.basename(s["path"].rstrip("\\/")).lower() == "downloads"][:1] or src[:1]
-        return [(s["path"], False, rank_of(s["path"])) for s in src]
-    return [(s["path"], bool(s.get("subfolders")), rank_of(s["path"])) for s in src]
-
-
+# ================================================================ 7. DUPLICATES
 COPY_RX = re.compile(r"(?i)(\s\(\d+\)|\s-\scopy(\s\(\d+\))?|\scopy(\s\d+)?)$")
 
 
@@ -1260,6 +1245,27 @@ def library_files(lib, sizes=None, skip=()):
     return out
 
 
+# ================================================================ 8. PLANNING (never changes anything on disk)
+def rank_of(p):
+    kf = known_folders()
+    for i, n in enumerate(("Documents", "Desktop", "Downloads"), 1):
+        if key(kf[n]) == key(p) or os.path.basename(p.rstrip("\\/")).lower() == n.lower():
+            return i
+    return 4
+
+
+def roots_for(cfg, mode, folder):
+    if mode == "import":
+        return [(folder, True, 5)]
+    if mode == "resort":
+        return [(cfg["library"], True, 0)]
+    src = cfg["sources"]
+    if mode == "watch":
+        src = [s for s in src if os.path.basename(s["path"].rstrip("\\/")).lower() == "downloads"][:1] or src[:1]
+        return [(s["path"], False, rank_of(s["path"])) for s in src]
+    return [(s["path"], bool(s.get("subfolders")), rank_of(s["path"])) for s in src]
+
+
 def place_unit(R, lib, u):
     """Where a named folder goes, as a whole."""
     name, all_files = os.path.basename(u["src"]), u["files"]
@@ -1297,7 +1303,10 @@ def make_plan(cfg, mode="organize", folder=None, quiet=False):
     roots = roots_for(cfg, mode, folder)
     for root, sub, rank in roots:
         m = isdir(root) and R.project(root)
-        if not isdir(root):
+        outer = next((r for r, *_ in roots if r != root and inside(root, r)), None)
+        if outer:
+            scan.skip(root, f"already covered by {outer}")
+        elif not isdir(root):
             scan.skip(root, "folder not found")
         elif m and (isdir(os.path.join(root, m)) or m.lower() == "pyvenv.cfg"):
             scan.skip(root, f"the whole folder is a code project (it has {m})")
@@ -1381,7 +1390,7 @@ def make_plan(cfg, mode="organize", folder=None, quiet=False):
         r = os.path.relpath(it["dst"], lib).split(os.sep)
         it["cat"] = "/".join(r[:2]) if r[0] in ("Documents", "_Review", "WhatsApp & Chats") and len(r) > 2 else r[0]
     items = [{k: v for k, v in i.items() if not k.startswith("_") and k not in ("rank", "lib")} for i in items]
-    return {"id": time.strftime("%Y%m%d-%H%M%S-") + f"{int(time.time() * 1000) % 1000:03d}", "made": stamp(), "mode": mode, "library": lib, "folder": folder,
+    return {"id": new_id(), "made": stamp(), "mode": mode, "library": lib, "folder": folder,
             "roots": [r[0] for r in roots], "items": items, "skipped": scan.skipped, "maybe": maybe,
             "scanned": len(scan.files) + sum(len(u["files"]) for u in scan.units), "scanned_bytes": scan.bytes}
 
@@ -1418,9 +1427,10 @@ def summary(plan):
     say(f"Looked at {count(plan['scanned'], 'file')} ({size(plan['scanned_bytes'])}).")
     say(f"Will move {count(len(mv), 'item')} ({size(sum(i['size'] for i in mv))}) into {plan['library']}")
     if du:
-        say(f"{count(len(du), 'duplicate')} ({size(sum(i['size'] for i in du))}) go to _Review/Duplicates "
+        say(f"{count(len(du), 'duplicate')} ({size(sum(i['size'] for i in du))}) will go to _Review/Duplicates "
             "(nothing is deleted).")
-    say(f"{count(len(plan['skipped']), 'thing')} will be left alone (the report says why for each one).")
+    if plan["skipped"]:
+        say(f"{count(len(plan['skipped']), 'thing')} will be left alone (the report says why for each one).")
     for c, (n, b) in cats(plan)[:14]:
         say(f"   {c[:40]:<40} {n:>8,}  {size(b):>10}")
 
@@ -1429,7 +1439,7 @@ def save_plan(plan):
     os.makedirs(os.path.join(DATA, "plans"), exist_ok=True)
     p = os.path.join(DATA, "plans", plan["id"] + ".json")
     with open(p, "w", encoding="utf-8") as f:
-        json.dump(plan, f, ensure_ascii=False)
+        json.dump(plan, f)
     return p
 
 
@@ -1442,7 +1452,7 @@ def last_plan():
         return json.load(f)
 
 
-# ================================================================ 8. APPLYING THE PLAN, WITH THE JOURNAL
+# ================================================================ 9. APPLYING THE PLAN, WITH THE JOURNAL
 def has_files(d):
     return any(os.path.basename(f).lower() not in IGNORABLE for f in tree_of(d)[1])
 
@@ -1475,6 +1485,9 @@ def move_split(J, src, dst):
 def apply_plan(plan, kind=None, force_copy=False, stop_after=None, quiet=False):
     """Carry out a plan the user said YES to. Each batch of intentions is on disk before any file moves."""
     items, lib = plan["items"], plan["library"]
+    if not isdir(lib) and not isdir(os.path.dirname(os.path.abspath(lib))):
+        bad(f"The library folder {lib} isn't available (is its drive plugged in?). Nothing was changed.")
+        return {"run": "", "moved": [], "failed": [], "stopped": True}
     J = Journal(kind or plan["mode"], plan=plan["id"], library=lib)
     prog = Progress("Moving", len(items), sum(i["size"] for i in items), quiet)
     moved, failed, streak, taken = [], [], 0, set()
@@ -1532,12 +1545,14 @@ def apply_plan(plan, kind=None, force_copy=False, stop_after=None, quiet=False):
     dups = [i for i in moved if i.get("dup")]
     if dups:  # the list of duplicates: where each came from and which copy was kept
         out = unique(os.path.join(lib, "_Review", "Duplicates", f"duplicates {J.id}.csv"))
-        with open(L(out), "w", newline="", encoding="utf-8-sig") as f:
+        with open(L(out), "w", newline="", encoding="utf-8-sig", errors="replace") as f:
             w = csv.writer(f)
             w.writerow(["Duplicate (now here)", "It came from", "The copy that was kept", "Size"])
             w.writerows([i["dst"], i["src"], i.get("kept", ""), i["size"]] for i in dups)
         J.w(t="create", path=out, size=lstat(out).st_size)
     J.close(status="stopped" if stopped else "complete", moved=len(moved), failed=len(failed))
+    plan["applied"] = J.id
+    save_plan(plan)  # a plan is carried out once; 'tidy.py apply' won't repeat it
     res = {"run": J.id, "moved": moved, "failed": failed, "stopped": stopped}
     if not quiet:
         mv = [i for i in moved if not i.get("dup")]
@@ -1554,7 +1569,7 @@ def apply_plan(plan, kind=None, force_copy=False, stop_after=None, quiet=False):
     return res
 
 
-# ================================================================ 9. UNDO AND CRASH RECOVERY
+# ================================================================ 10. UNDO AND CRASH RECOVERY
 def read_run(path):
     """A journal as a dict. A half-written last line (power cut) is simply ignored."""
     r = {"path": path, "head": {}, "seq": [], "done": {}, "fail": {}, "end": None, "undone": None}
@@ -1599,7 +1614,13 @@ def describe(r):
 def recover(quiet=False):
     """After a crash or power cut: settle the one unfinished step of any run that never reached its end.
     Our own partial copies are removed; a finished copy whose original still exists is taken back."""
-    for r in list_runs():
+    d = os.path.join(DATA, "runs")
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        with open(os.path.join(d, name), "rb") as f:
+            f.seek(max(0, os.fstat(f.fileno()).st_size - 4096))
+            if b'"t": "end"' in f.read():
+                continue  # finished normally
+        r = read_run(os.path.join(d, name))
         if r["end"]:
             continue
         with open(r["path"], "a", encoding="utf-8") as f:
@@ -1620,7 +1641,7 @@ def recover(quiet=False):
                         state = "done"
                 except OSError:
                     pass
-                f.write(json.dumps({"t": state, "n": b["n"], "why": "interrupted"}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"t": state, "n": b["n"], "why": "interrupted"}) + "\n")
             f.write(json.dumps({"t": "end", "ended": stamp(), "status": "interrupted"}) + "\n")
         if not quiet:
             warn(f"An earlier run ({r['head'].get('started')}) was cut off. I've tidied up its unfinished step - "
@@ -1657,7 +1678,8 @@ def undo_run(r, quiet=False):
                     mkdirs(os.path.dirname(to), J)
                     how = "rename" if same_drive(dst, to) else "split" if isdir(dst) else "copy"
                     n = J.begin(op="move", src=dst, dst=to, how=how, kind=b["kind"], size=b["size"], mtime=b["mtime"])
-                    J.sync()
+                    if how != "rename":
+                        J.sync()  # (a rename needs no wait: running undo again simply finds it already back)
                     if how == "split":
                         move_split(J, dst, to)
                     else:
@@ -1712,7 +1734,7 @@ def undo_menu(run_id=None):
             undo_run(r)
 
 
-# ================================================================ 10. THE HTML REPORT
+# ================================================================ 11. THE HTML REPORT
 REPORT = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,
 initial-scale=1"><title>tidy report</title><style>
 :root{--bg:#fff;--fg:#1d2330;--mut:#5d6675;--card:#f1f4f8;--line:#dde2e8;--bar:#2a78d6}
@@ -1721,7 +1743,8 @@ initial-scale=1"><title>tidy report</title><style>
 main{max-width:1100px;margin:auto;padding:16px}h2{margin:1.8em 0 .5em;font-size:1.15em}.mut{color:var(--mut)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
 .card{background:var(--card);border-radius:10px;padding:12px}.card b{display:block;font-size:1.35em}
-.bar{display:grid;grid-template-columns:minmax(0,15em) minmax(0,1fr) 9em;gap:8px;align-items:center;margin:4px 0}
+.bar{display:grid;grid-template-columns:minmax(0,38%) minmax(3em,1fr) auto;gap:8px;align-items:center;margin:4px 0}
+td.n{white-space:nowrap}
 .bar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar i{display:block;height:12px;
 border-radius:3px;background:var(--bar)}table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:5px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
@@ -1747,8 +1770,8 @@ def tree_text(rows, root, depth):
         for k in range(min(len(parts), depth) + 1):
             a = agg[tuple(parts[:k])]
             a[0], a[1] = a[0] + 1, a[1] + n
-    return "\n".join("   " * len(k) + (k[-1] if k else root) + f"/   {a[0]:,} - {size(a[1])}"
-                     for k, a in sorted(agg.items()))
+    return "\n".join("   " * (len(k) - (not root)) + (k[-1] if k else root) + f"/   {a[0]:,} - {size(a[1])}"
+                     for k, a in sorted(agg.items()) if k or root)
 
 
 def write_report(plan, res=None):
@@ -1775,7 +1798,7 @@ def write_report(plan, res=None):
              f"{size(b)}</span></div>" for c, (n, b) in cats(plan)]
     big = sorted(items, key=lambda i: -i["size"])[:25]
     body.append("<h2>The 25 largest</h2><table><tr><th>Size<th>File<th>Goes to</tr>" + "".join(
-        f"<tr><td>{size(i['size'])}<td>{e(short(i['src']))}<td>{e(os.path.relpath(i['dst'], lib))}" for i in big) +
+        f"<tr><td class=n>{size(i['size'])}<td>{e(short(i['src']))}<td>{e(os.path.relpath(i['dst'], lib))}" for i in big) +
         "</table>")
     before = tree_text([(short(os.path.dirname(i["src"])).split(os.sep), i["size"]) for i in items], "", 9)
     after = tree_text([(os.path.relpath(os.path.dirname(i["dst"]), lib).split(os.sep), i["size"]) for i in items],
@@ -1792,7 +1815,7 @@ def write_report(plan, res=None):
     mid, post = rest.split("@DATA@")
     os.makedirs(os.path.join(DATA, "reports"), exist_ok=True)
     out = os.path.join(DATA, "reports", f"report {plan['id']}.html")
-    with open(out, "w", encoding="utf-8") as f:
+    with open(out, "w", encoding="utf-8", errors="replace") as f:
         f.write(pre + "".join(body) + mid + json.dumps(data, ensure_ascii=False).replace("<", "\\u003c") + post)
     return out
 
@@ -1804,7 +1827,7 @@ def show(path):
         pass
 
 
-# ================================================================ 11. PHONE IMPORT
+# ================================================================ 12. PHONE IMPORT
 PHONE_DIRS = ["DCIM", "Pictures", "Download", "Documents", "Movies", "Music", "Recordings",
               "Android/media/com.whatsapp/WhatsApp/Media", "WhatsApp/Media", "Telegram",
               "Android/media/org.telegram.messenger/Telegram"]
@@ -1870,7 +1893,9 @@ def wait_for_phone(exe):
             devs = [line.split("\t")[:2] for line in out.splitlines()[1:] if "\t" in line]
             ready = [d for d, s in devs if s == "device"]
             if ready:
-                return ready[0] if len(ready) == 1 else ready[pick("Which phone?", ready, back=None)]
+                serial = ready[0] if len(ready) == 1 else ready[pick("Which phone?", ready, back=None)]
+                good(f"Found the phone ({serial}).")
+                return serial
             msg = ("The phone is asking for permission: unlock it and tap Allow." if any(
                 s == "unauthorized" for _, s in devs) else "Connected but not ready: unplug it and plug it in again."
                    if devs else "No phone yet...")
@@ -2013,7 +2038,7 @@ def memory(pid, mem=None):
             return {}
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(mem, f, ensure_ascii=False)
+        json.dump(mem, f)
     os.replace(p + ".tmp", p)
 
 
@@ -2085,7 +2110,7 @@ def phone_import(cfg, src):
     files, mem = src.listing(), memory(src.id)
     new = {r: v for r, v in files.items() if tuple(mem.get(r, [0, 0])[:2]) != tuple(v)}
     say(f"The phone has {count(len(files), 'file')} in its photo, download, document, music and chat folders; "
-        f"{len(new):,} are new since the last import ({size(sum(n for n, _ in new.values()))}).")
+        f"{len(new):,} of them new since the last import ({size(sum(n for n, _ in new.values()))}).")
     if new and confirm(f"\nCopy them into {stage}?\nNothing on the phone is changed."):
         with Lock(), Stoppable():
             fetch(src, new, os.path.join(stage, time.strftime("%Y-%m-%d %H.%M.%S")), mem)
@@ -2154,7 +2179,7 @@ def import_folder(cfg, folder=None):
     return warn(f"Can't use that: {why}.") if why else organize(cfg, "import", folder)
 
 
-# ================================================================ 12. ORGANIZE, WATCH, MENU
+# ================================================================ 13. ORGANIZE, WATCH, MENU
 def organize(cfg, mode="organize", folder=None, kind=None):
     say("\nLooking at your files... (this changes nothing)")
     plan = make_plan(cfg, mode, folder)
@@ -2314,8 +2339,9 @@ def main(argv=None):
         say("\nRun  tidy.py apply  to carry out this plan.")
     elif a.cmd == "apply":
         plan = last_plan()
-        if not plan:
-            return bad("There's no plan yet: run  tidy.py plan  first.") or 1
+        if not plan or plan.get("applied") or key(plan["library"]) != key(cfg["library"]):
+            return bad("There's no new plan to carry out" + (" (the latest one was already carried out, or was made "
+                       "for another library)" if plan else "") + ": run  tidy.py plan  first.") or 1
         summary(plan)
         if time.time() - time.mktime(time.strptime(plan["made"], "%Y-%m-%d %H:%M:%S")) > 86400:
             warn("This plan is more than a day old. tidy re-checks every file and skips anything that changed.")
@@ -2337,7 +2363,7 @@ def main(argv=None):
     return 0
 
 
-# ================================================================ 13. SELF-TEST
+# ================================================================ 14. SELF-TEST
 TINY_JPEG = ("/9sAQwAQCwwODAoQDg0OEhEQExgoGhgWFhgxIyUdKDozPTw5Mzg3QEhcTkBEV0U3OFBtUVdfYmdoZz5NcXlwZHhcZWdj/8AACwgAAQA"
              "BAQERAP/EABQAAQAAAAAAAAAAAAAAAAAAAAD/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAA/AD//2Q==")
 
